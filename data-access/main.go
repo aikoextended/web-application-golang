@@ -1,101 +1,118 @@
 package main
 
 import (
+	"database/sql"
 	"fmt"
 	"log"
-    "os"
+	"os"
 
-	"gorm.io/driver/mysql"
-	"gorm.io/gorm"
-    "github.com/joho/godotenv"
+	"github.com/go-sql-driver/mysql"
 )
 
+var db *sql.DB
+
 type Album struct {
-	ID     uint    `gorm:"primaryKey"`
-	Title  string 
-	Artist string 
+	ID     int64
+	Title  string
+	Artist string
 	Price  float32
 }
 
 func main() {
-    err := godotenv.Load()
-	if err != nil {
-		log.Fatal("Error loading .env file")
+	// Capture connection properties.
+	cfg := mysql.Config{
+		User:   os.Getenv("DBUSER"),
+		Passwd: os.Getenv("DBPASS"),
+		Net:    "tcp",
+		Addr:   "127.0.0.1:3306",
+		DBName: "recordings",
 	}
-    
-    dbUser := os.Getenv("DB_USER")
-	dbPass := os.Getenv("DB_PASS")
-	dbHost := os.Getenv("DB_HOST")
-	dbPort := os.Getenv("DB_PORT")
-	dbName := os.Getenv("DB_NAME")
-
-	dsn := fmt.Sprintf("%s:%s@tcp(%s:%s)/%s?charset=utf8mb4&parseTime=True&loc=Local",
-		dbUser, dbPass, dbHost, dbPort, dbName)
-
-	// Open a connection to the database
-	db, err := gorm.Open(mysql.Open(dsn), &gorm.Config{})
+	// Get a database handle.
+	var err error
+	db, err = sql.Open("mysql", cfg.FormatDSN())
 	if err != nil {
-		log.Fatal("Failed to connect to the database:", err)
+		log.Fatal(err)
+	}
+
+	pingErr := db.Ping()
+	if pingErr != nil {
+		log.Fatal(pingErr)
 	}
 	fmt.Println("Connected!")
 
-	err = db.AutoMigrate(&Album{})
+	albums, err := albumsByArtist("John Coltrane")
 	if err != nil {
-		log.Fatal("Failed to migrate database schema:", err)
+		log.Fatal(err)
 	}
+	fmt.Printf("Albums found: %v\n", albums)
 
-	// Insert a new album
-	newAlbum := Album{
+	// Hard-code ID 2 here to test the query.
+	alb, err := albumByID(2)
+	if err != nil {
+		log.Fatal(err)
+	}
+	fmt.Printf("Album found: %v\n", alb)
+
+	albID, err := addAlbum(Album{
 		Title:  "The Modern Sound of Betty Carter",
 		Artist: "Betty Carter",
 		Price:  49.99,
-	}
-	err = addAlbum(db, &newAlbum)
+	})
 	if err != nil {
-		log.Fatal("Failed to add album:", err)
+		log.Fatal(err)
 	}
-	fmt.Printf("New album added with ID: %d\n", newAlbum.ID)
-
-	// Fetch albums by artist
-	albums, err := albumsByArtist(db, "Betty Carter")
-	if err != nil {
-		log.Fatal("Failed to fetch albums:", err)
-	}
-	fmt.Printf("Albums found: %+v\n", albums)
-
-	// Fetch album by ID
-	alb, err := albumByID(db, newAlbum.ID)
-	if err != nil {
-		log.Fatal("Failed to fetch album by ID:", err)
-	}
-	fmt.Printf("Album found: %+v\n", alb)
+	fmt.Printf("ID of added album: %v\n", albID)
 }
 
-func albumsByArtist(db *gorm.DB, artist string) ([]Album, error) {
+// albumsByArtist queries for albums that have the specified artist name.
+func albumsByArtist(name string) ([]Album, error) {
+	// An albums slice to hold data from returned rows.
 	var albums []Album
-	result := db.Where("artist = ?", artist).Find(&albums)
-	if result.Error != nil {
-		return nil, fmt.Errorf("albumsByArtist %q: %v", artist, result.Error)
+
+	rows, err := db.Query("SELECT * FROM album WHERE artist = ?", name)
+	if err != nil {
+		return nil, fmt.Errorf("albumsByArtist %q: %v", name, err)
+	}
+	defer rows.Close()
+	// Loop through rows, using Scan to assign column data to struct fields.
+	for rows.Next() {
+		var alb Album
+		if err := rows.Scan(&alb.ID, &alb.Title, &alb.Artist, &alb.Price); err != nil {
+			return nil, fmt.Errorf("albumsByArtist %q: %v", name, err)
+		}
+		albums = append(albums, alb)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("albumsByArtist %q: %v", name, err)
 	}
 	return albums, nil
 }
 
-func albumByID(db *gorm.DB, id uint) (Album, error) {
-	var album Album
-	result := db.First(&album, id)
-	if result.Error != nil {
-		if result.Error == gorm.ErrRecordNotFound {
-			return album, fmt.Errorf("albumByID %d: no such album", id)
+// albumByID queries for the album with the specified ID.
+func albumByID(id int64) (Album, error) {
+	// An album to hold data from the returned row.
+	var alb Album
+
+	row := db.QueryRow("SELECT * FROM album WHERE id = ?", id)
+	if err := row.Scan(&alb.ID, &alb.Title, &alb.Artist, &alb.Price); err != nil {
+		if err == sql.ErrNoRows {
+			return alb, fmt.Errorf("albumsById %d: no such album", id)
 		}
-		return album, fmt.Errorf("albumByID %d: %v", id, result.Error)
+		return alb, fmt.Errorf("albumsById %d: %v", id, err)
 	}
-	return album, nil
+	return alb, nil
 }
 
-func addAlbum(db *gorm.DB, album *Album) error {
-	result := db.Create(album)
-	if result.Error != nil {
-		return fmt.Errorf("addAlbum: %v", result.Error)
+// addAlbum adds the specified album to the database,
+// returning the album ID of the new entry
+func addAlbum(alb Album) (int64, error) {
+	result, err := db.Exec("INSERT INTO album (title, artist, price) VALUES (?, ?, ?)", alb.Title, alb.Artist, alb.Price)
+	if err != nil {
+		return 0, fmt.Errorf("addAlbum: %v", err)
 	}
-	return nil
+	id, err := result.LastInsertId()
+	if err != nil {
+		return 0, fmt.Errorf("addAlbum: %v", err)
+	}
+	return id, nil
 }
