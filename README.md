@@ -1,3 +1,7 @@
+| Name           | NRP        |
+| ---            | ---        |
+| Putri Meyliya Rachmawati | 5025221062 |
+
 
 ## Go Wiki Result
 ### How To Run
